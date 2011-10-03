@@ -2,11 +2,11 @@
 {-# LANGUAGE TypeOperators #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE Rank2Types #-}
+module Main where
 
-module SVM where
-
-import Prelude hiding (replicate, zip, map, filter, max, min, not, zipWith, sum, 
-  unzip, fst, snd, replicate, maximum, minimum)
+import Prelude hiding (replicate, zip, map, filter, max, min, not, zipWith, sum
+  , unzip, fst, snd, replicate, maximum, minimum)
   
 import qualified Prelude as P
 import Data.Array.Accelerate as Acc
@@ -83,7 +83,9 @@ minimum arr = foldAll min (first arr) arr
 testmin = run $ minimum (createArray (index1 4) ([1, 3, 5, 7]::[Int]))
 
 -- Find the sum of an array
-sum :: (Num a, IsNum a, Elt a) => Acc(Vector a) -> Acc (Scalar a)
+sum
+  :: (Elt a, IsNum a, Shape ix) =>
+     Acc (Array (ix :. Int) a) -> Acc (Array ix a)
 sum xs = fold (+) 0 xs
 
 testsum = run $ sum (createArray (index1 4) ([1, 3, 5, 7]::[Int]))
@@ -107,7 +109,7 @@ find :: (Elt e) => (Exp e -> Exp Bool) -> Acc (Vector e) -> Exp e
 --find cond arr = first (filter cond arr) 
 find cond arr = (fold (\a b -> (cond a) ? (a, b)) (arr!index1 0) arr) ! index0
 
-testFind = fromExp $ val
+testfind = fromExp $ val
   where val = find (\x -> x ==* 3) (createArray (index1 2) [1, 3::Int])
 
 -- If then else data structure
@@ -115,7 +117,7 @@ cond2 :: (Elt t) => (Exp Bool, Exp t) -> (Exp Bool, Exp t) -> Exp t
   -> Exp t
 cond2 (c1, a1) (c2, a2) a3 = c1 ? (a1, (c2 ? (a2, a3)))
 
-testCond = fromExp val
+testcond = fromExp val
   where val = cond2 (1==*(0::Exp Int), 0) (1==*(0::Exp Int), 1) (2::Exp Int)
 
 -- Get vector at location in matrix
@@ -225,10 +227,10 @@ step args state as fs debug iterations =
     (bh, bl, ih, il) = state
     xhx = vm kfn (xs`at`ih) xs
     xlx = vm kfn (xs`at`il) xs
-    xxx = kfn xs xs -- rotate xs?
+    xxx = kfn xs xs
     as' = updateAlpha args state as xhx xlx
     fs' = updatePhi args state fs xhx xlx (as'!ih-as!ih) (as'!il-as!il)
-    state' =  updateState args as' fs' xhx xxx
+    state' = updateState args as' fs' xhx xxx
 
 -- Start stepping through minimization and return result.
 minimize
@@ -251,7 +253,7 @@ minimize args debug iterations =
     ih = lift $ fromExp $ find (\ix -> (ys!ix) ==* 1) (indicesOf ys)
     il = lift $ fromExp $ find (\ix -> (ys!ix) ==* -1) (indicesOf ys)
     
-    
+-- use this template to create classifier of a single point   
 template
   :: (Elt e, IsFloating e, Elt t, IsNum t) =>
      (Acc (Array DIM2 e) -> Acc (Array DIM2 e) -> Acc (Vector e))
@@ -261,29 +263,61 @@ template
      -> Exp e
      -> Acc (Vector e)
      -> Exp t
-template kfn xs ys as b z = 
+template kfn xs ys as' b z = 
   let zx = vm kfn z xs
+      as = use $ run as' -- cache as
       v = fromScalar $ sum $ map 
             (\ix->(ys!ix)*(as!ix)*(zx!ix)) 
             (indicesOf ys)
       y = -b + v --
   in (y >* 0) ? (1, -1)
 
-  
+-- use this template to create classifier of many points
+template2
+  :: (Elt e, IsFloating e) =>
+     (Acc (Array DIM3 e)
+     -> Acc (Array DIM3 e)
+     -> Acc (Array DIM2 e))
+     -> Acc (Array DIM2 e)
+     -> Acc (Vector e)
+     -> Acc (Vector e)
+     -> Exp e
+     -> Acc (Array DIM2 e)
+     -> Acc (Vector e)
+template2 kfn xs ys as' b zs = 
+  -- Array (Z :. 3) :. 3 [z1*x1, z2*x1, z3*x1, 
+  --                      z1*x2, z2*x2, z3*x2, 
+  --                      z1*x3, z2*x3, z3*x3]
+  -- TODO: cast kfn 221 to kfn 332  
+  let zsxs = (cm kfn) zs xs  
+      as = use $ run as' -- cache as
+      Z :. yh = unlift (shape ys) :: (Z:. Exp Int)
+      iy = (replicate (lift $ Z :. All :. yh) (indicesOf ys)) :: Acc(Array DIM2 DIM1)
+      vs = sum $ map (\iab -> let Z :. a :. b = unlift iab 
+                                                :: (Z:. Exp Int :. Exp Int) 
+                                  ia = (index1 a)
+                                  ib = (index1 b)
+                               in
+                               (ys!ia)*(as!ia)*(zs!iab))
+                      (indicesOf iy)
+  in map (\v -> (-b + v >* 0) ? (1, -1)) vs
+                   
 -- Train a support vector machine and return a classifier of each point
 train
-  :: (Plain t ~ t, IsFloating t, Elt t, Lift t, Elt t1, IsNum t1) =>
+  :: (Plain t ~ t, IsFloating t, Elt t, Lift t) =>
      (Acc (Array DIM2 t) -> Acc (Array DIM2 t) -> Acc (Vector t))
+     -> (Acc (Array DIM3 t) -> Acc (Array DIM3 t) -> Acc (Array DIM2 t))
      -> Acc (Array DIM2 t)
      -> Acc (Vector t)
+     -> Acc (Array DIM2 t)
      -> Acc (Vector t)
-     -> Exp t1
-train kfn xs ys =
+train kfn kfn3 xs ys =
   let (c, r) = (4, 0.001)
       args = (c, r, kfn, xs, ys)
       (as, b) = minimize args False 0
-  in template kfn xs ys as (lift b)
+  in template2 kfn3 xs ys as (lift b)
 
+-- One x kfn-ed with each of ys
 vm
   :: (Elt e, IsFloating e) =>
      (Acc (Array DIM2 e) -> Acc (Array DIM2 e) -> Acc (Vector e))
@@ -296,62 +330,61 @@ vm kfn xsv ys = kfn xsm ys
         
 type Number = Float	 
 
--- Vector matrix multiplcation
+-- Vector matrix multiplcation kernel function. 
+-- Can only guarantee to work with 1st order heuristic
 mmmult
   :: (Elt e, IsFloating e) =>
      Acc (Array DIM2 e)
      -> Acc (Array DIM2 e)
      -> Acc (Vector e)
 mmmult xs ys = Acc.fold (+) 0 (Acc.zipWith (*) xs ys)
- -- where xsm =  (replicate (lift $ Z :. yh:.All) xs)
-	      --Z :. yh :. yw = unlift (shape ys) :: (Z:. Exp Int :. Exp Int)
 
+-- gaussian kernel function
 gaussian
   :: (Elt e, IsFloating e) =>
      Acc (Array DIM2 e)
      -> Acc (Array DIM2 e)
      -> Acc (Vector e)
-gaussian xs ys = Acc.map (\x -> exp (-x)) mse
-  where 
-    mse =(Acc.fold (+) 0 (Acc.zipWith (\x y -> ((x-y)^2)) xs ys))
+gaussian xs ys = 
+  Acc.map (\x -> exp (-x)) 
+          (Acc.fold (+) 0 (Acc.zipWith (\x y -> ((x-y)^2)) xs ys))
 
-testg = gaussian xs ys
-  where 
-    xs = createArray (index2 2 2) ([1, 2, 3, 4]::[Number])
-    ys = createArray (index2 2 2) ([4, 3, 2, 1]::[Number])
+-- gaussian kernel function but for DIM3 Arrays
+gaussian3
+  :: (Elt e, IsFloating e) =>
+     Acc (Array DIM3 e)
+     -> Acc (Array DIM3 e)
+     -> Acc (Array DIM2 e)
+gaussian3 xs ys = 
+  Acc.map (\x -> exp (-x)) 
+          (Acc.fold (+) 0 (Acc.zipWith (\x y -> ((x-y)^2)) xs ys))
 
--- Train a support vector machine and return a classifier of each point
-debug xs ys i =
-  let (c, r) = (4, 0.001)
-      (as, b) = minimize (c, r, gaussian, xs, ys) True i
-  in (run as, b)
+-- each of xs kfn-ed with each of ys
+cm kfn xs ys = kfn xs3 ys3
+  where xs3 = (replicate (lift $ Z :. All :. yh :. All) xs)
+        ys3 = (replicate (lift $ Z :. yh :. All :. All) ys) 
+        Z :. yh :. yw = unlift (shape ys) :: (Z:. Exp Int :. Exp Int)
 
--- Simple test
-xs = createArray (index2 2 2) -- # width, height
-       ([-1, 1, 1, -1]::[Number])
-ys = createArray (index1 2) -- # height
-       ([-1, 1]::[Number])
-       
-testt :: Exp Int -> Int
-testt r = 
-  fromExp $ (train mmmult xs ys) 
-            (xs`at`(index1 r))
+-- points
+xs = createArray (index2 10 8) 
+     ([6,148,72,35,0,33.6,0.627,50,
+       1,85,66,29,0,26.6,0.351,31,
+       8,183,64,0,0,23.3,0.672,32,
+       1,89,66,23,94,28.1,0.167,21,
+       0,137,40,35,168,43.1,2.288,33,
+       5,116,74,0,0,25.6,0.201,30,
+       3,78,50,32,88,31,0.248,26,
+       10,115,0,0,0,35.3,0.134,29,
+       2,197,70,45,543,30.5,0.158,53,
+       8,125,96,0,0,0,0.232,54]::[Number])
+-- labels
+ys = createArray (index1 10) ([1,-1,1,-1,1,-1,1,-1,1,1]::[Number])
 
--- More complicated test
-rawx = [ 6,148,72,35,0,33.6,0.627,50,
- 1,85,66,29,0,26.6,0.351,31,
- 8,183,64,0,0,23.3,0.672,32,
- 1,89,66,23,94,28.1,0.167,21,
- 0,137,40,35,168,43.1,2.288,33,
- 5,116,74,0,0,25.6,0.201,30,
- 3,78,50,32,88,31,0.248,26,
- 10,115,0,0,0,35.3,0.134,29,
- 2,197,70,45,543,30.5,0.158,53,
- 8,125,96,0,0,0,0.232,54]::[Number]
-rawy = [1,-1,1,-1,1,-1,1,-1,1,1]::[Number]
+-- classifier
+classifier = (train gaussian gaussian3 xs ys)
 
-diabx = createArray (index2 4 8) rawx
-diaby = createArray (index1 4) rawy
-diabb i = (debug diabx diaby i)
-diab r = (fromExp $ (train gaussian diabx diaby) (diabx`at`(index1 r)))::Int
+-- classify all 10 points
+classify = classifier xs :: Acc (Vector Number)
 
+main :: IO ()
+main = putStrLn $ show $ run classify
