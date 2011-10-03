@@ -21,6 +21,13 @@ fromScalar x = x ! index0
 fromExp :: (Elt a) => Exp a -> a
 fromExp x = (toList(run $ unit $ x))!!0
 
+-- Exp Bool -> Bool
+fromExpBool :: Exp Bool -> Bool
+fromExpBool x
+  | int == 1 = True
+  | otherwise = False
+  where int = (fromExp (x ? (1, 0))) :: Int
+
 -- Create 2d index
 index2 :: Int -> Int -> Exp (Z :. Int :. Int)
 index2 x y = lift $ Z :. x :. y
@@ -42,8 +49,7 @@ inside
   :: (Elt t, IsScalar t) => Exp t -> (Exp t, Exp t) -> Exp Bool
 inside n (low, high) = (low <* n) &&* (n <* high)
 
-testin1 = fromExp $ inside (3::Exp Int) (2, 4)
-testin2 = fromExp $ inside (3::Exp Int) (2, 3)
+testin1 = fromExp ((inside (3::Exp Int) (2, 4)) ? (1, 0::Exp Int))
 
 -- Create Acc(Array sh a) from [a]
 createArray :: (Shape dim, Elt e) => Exp dim -> [e] -> Acc(Array dim e)
@@ -54,11 +60,11 @@ ieq1 :: Exp DIM1 -> Exp DIM1 -> Exp Bool
 ieq1 ix iy = x ==* y
   where ((Z:.x),(Z:.y)) = (unlift ix, unlift iy)
 
-testieq = fromExp $ ieq1 (index1 5) (index1 5)
+testieq = fromExp $ ((ieq1 (index1 5) (index1 5)) ? (1, 0::Exp Int))
 
 -- Get first value of array
 first :: (Shape ix, Elt e) => Acc (Array ix e) -> Exp e
-first arr = (reshape (index1 $ size arr) arr) ! (index1 0)
+first arr = (reshape (index1 $ lift $ fromExp $ size arr) arr) ! (index1 0)
 
 testfst = fromExp $ first (createArray (index1 4) ([1, 3, 5, 7]::[Int]))
 
@@ -98,12 +104,19 @@ filter cond xs =
 -- Find first value of an array that matches a condition
 -- !It'll crash if nothing matches!
 find :: (Elt e) => (Exp e -> Exp Bool) -> Acc (Vector e) -> Exp e
-find cond arr = first (filter cond arr)  
+--find cond arr = first (filter cond arr) 
+find cond arr = (fold (\a b -> (cond a) ? (a, b)) (arr!index1 0) arr) ! index0
+
+testFind = fromExp $ val
+  where val = find (\x -> x ==* 3) (createArray (index1 2) [1, 3::Int])
 
 -- If then else data structure
 cond2 :: (Elt t) => (Exp Bool, Exp t) -> (Exp Bool, Exp t) -> Exp t 
   -> Exp t
 cond2 (c1, a1) (c2, a2) a3 = c1 ? (a1, (c2 ? (a2, a3)))
+
+testCond = fromExp val
+  where val = cond2 (1==*(0::Exp Int), 0) (1==*(0::Exp Int), 1) (2::Exp Int)
 
 -- Get vector at location in matrix
 at :: (Elt e) => Acc (Array DIM2 e) -> Exp DIM1 -> Acc (Vector e)
@@ -131,7 +144,7 @@ updateAlpha
      -> Acc (Vector e)
      -> Acc (Vector e)
      -> Acc (Vector e)
-updateAlpha (c, r, kfn, xs, ys) (bh, bl, ih, il) as xhx xlx = 
+updateAlpha (c, r, kfn, xs, ys) (bh, bl, ih, il) as xhx xlx =
   map (\ia -> let (i, a) = (fst ia, snd ia) 
               in cond2 (ieq1 i ih, ah') (ieq1 i il, al') a) 
       asx
@@ -158,8 +171,6 @@ updatePhi (c, r, kfn, xs, ys) (bh, bl, ih, il) fs xhx xlx ahd ald =
                ahd*(ys!ih)*(xhx!ix) + 
 			         ald*(ys!il)*(xlx!ix)) 
 			 (indicesOf fs)
-			 
-
 			 
 -- Update bh, bl, ih, il
 updateState
@@ -189,7 +200,6 @@ updateState (c, r, kfn, xs, ys) as fs xhx xxx =
     il = find (\ix -> (dfs!ix) ==* maxdf) fils
     --il = find (\ix -> (fs!ix) ==* bl) ils
 
-
 -- Step in minimization
 step
   :: (IsFloating e, Elt e) =>
@@ -205,7 +215,7 @@ step
      -> Int
      -> (Acc (Vector e), e)
 step args state as fs debug iterations =
-  if (fromExp (bl <=* bh + 2 * r)) || 
+  if (fromExpBool (bl <=* bh + 2 * r)) || 
      (debug && (iterations == 0)) then
     (as, fromExp (bl + bh)/2)
   else
@@ -218,7 +228,7 @@ step args state as fs debug iterations =
     xxx = kfn xs xs -- rotate xs?
     as' = updateAlpha args state as xhx xlx
     fs' = updatePhi args state fs xhx xlx (as'!ih-as!ih) (as'!il-as!il)
-    state' = updateState args as' fs' xhx xxx
+    state' =  updateState args as' fs' xhx xxx
 
 -- Start stepping through minimization and return result.
 minimize
@@ -238,8 +248,8 @@ minimize args debug iterations =
     fs = map (\y -> -y) ys
     as = generate (shape ys) (\ix -> 0)
     (bh, bl) = (-1, 1)
-    ih = find (\ix -> (ys!ix) ==* 1) (indicesOf ys)
-    il = find (\ix -> (ys!ix) ==* -1) (indicesOf ys)
+    ih = lift $ fromExp $ find (\ix -> (ys!ix) ==* 1) (indicesOf ys)
+    il = lift $ fromExp $ find (\ix -> (ys!ix) ==* -1) (indicesOf ys)
     
     
 template
@@ -270,21 +280,9 @@ train
      -> Exp t1
 train kfn xs ys =
   let (c, r) = (4, 0.001)
-      (as, b) = minimize (c, r, kfn, xs, ys) False 0
+      args = (c, r, kfn, xs, ys)
+      (as, b) = minimize args False 0
   in template kfn xs ys as (lift b)
-
-{-
--- Vector matrix multiplcation
-vmmult
-  :: Acc (Vector Double)
-     -> Acc (Array DIM2 Double)
-     -> Acc (Vector Double)
-vmmult xs ys = Acc.fold (+) 0 (Acc.zipWith (*) xsm ys)
-  where xsm =  (replicate (lift $ Z :. yh:.All) xs)
-	Z :. yh :. yw = unlift (shape ys) :: (Z:. Exp Int :. Exp Int)
--}
-
-
 
 vm
   :: (Elt e, IsFloating e) =>
@@ -294,24 +292,33 @@ vm
      -> Acc (Vector e)
 vm kfn xsv ys = kfn xsm ys
   where xsm =  (replicate (lift $ Z :. yh:.All) xsv)
-        Z :. yh :. yw = unlift (shape ys) :: (Z:. Exp Int :. Exp Int)	 
+        Z :. yh :. yw = unlift (shape ys) :: (Z:. Exp Int :. Exp Int)
+        
+type Number = Float	 
 
 -- Vector matrix multiplcation
 mmmult
-  :: Acc (Array DIM2 Double)
-     -> Acc (Array DIM2 Double)
-     -> Acc (Vector Double)
+  :: (Elt e, IsFloating e) =>
+     Acc (Array DIM2 e)
+     -> Acc (Array DIM2 e)
+     -> Acc (Vector e)
 mmmult xs ys = Acc.fold (+) 0 (Acc.zipWith (*) xs ys)
  -- where xsm =  (replicate (lift $ Z :. yh:.All) xs)
 	      --Z :. yh :. yw = unlift (shape ys) :: (Z:. Exp Int :. Exp Int)
 
 gaussian
-  :: Acc (Array DIM2 Double)
-     -> Acc (Array DIM2 Double)
-     -> Acc (Vector Double)
+  :: (Elt e, IsFloating e) =>
+     Acc (Array DIM2 e)
+     -> Acc (Array DIM2 e)
+     -> Acc (Vector e)
 gaussian xs ys = Acc.map (\x -> exp (-x)) mse
-  where mse = (Acc.fold (+) 0 (Acc.zipWith (\x y -> ((x-y)^2)) xs ys))
+  where 
+    mse =(Acc.fold (+) 0 (Acc.zipWith (\x y -> ((x-y)^2)) xs ys))
 
+testg = gaussian xs ys
+  where 
+    xs = createArray (index2 2 2) ([1, 2, 3, 4]::[Number])
+    ys = createArray (index2 2 2) ([4, 3, 2, 1]::[Number])
 
 -- Train a support vector machine and return a classifier of each point
 debug xs ys i =
@@ -321,9 +328,9 @@ debug xs ys i =
 
 -- Simple test
 xs = createArray (index2 2 2) -- # width, height
-       ([-1, 1, 1, -1]::[Double])
+       ([-1, 1, 1, -1]::[Number])
 ys = createArray (index1 2) -- # height
-       ([-1, 1]::[Double])
+       ([-1, 1]::[Number])
        
 testt :: Exp Int -> Int
 testt r = 
@@ -340,24 +347,11 @@ rawx = [ 6,148,72,35,0,33.6,0.627,50,
  3,78,50,32,88,31,0.248,26,
  10,115,0,0,0,35.3,0.134,29,
  2,197,70,45,543,30.5,0.158,53,
- 8,125,96,0,0,0,0.232,54]::[Double]
-rawy = [1,-1,1,-1,1,-1,1,-1,1,1]::[Double]
+ 8,125,96,0,0,0,0.232,54]::[Number]
+rawy = [1,-1,1,-1,1,-1,1,-1,1,1]::[Number]
 
 diabx = createArray (index2 4 8) rawx
 diaby = createArray (index1 4) rawy
 diabb i = (debug diabx diaby i)
 diab r = (fromExp $ (train gaussian diabx diaby) (diabx`at`(index1 r)))::Int
 
-tx = [-1,-1,-1,
-      0, 0, 0,
-      1, 1, 1, 
-      2, 2, 2]::[Double]
-ty = [1,-1, 1, 1]::[Double]
-
-txx = createArray (index2 4 3) tx
-tyy = createArray (index1 4) ty
-
-txy = vm gaussian (txx`at`(index1 0)) txx
-txys = gaussian txx txx
-
-db = (debug txx tyy 4)

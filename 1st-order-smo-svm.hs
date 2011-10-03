@@ -9,7 +9,7 @@ import Prelude hiding (replicate, zip, map, filter, max, min, not, zipWith, sum,
   
 import qualified Prelude as P
 import Data.Array.Accelerate as Acc
-import Data.Array.Accelerate.Interpreter
+import Data.Array.Accelerate.CUDA
 
 -- Scalar a -> Exp a
 fromScalar :: (Elt a) => Acc (Scalar a) -> Exp a
@@ -18,6 +18,13 @@ fromScalar x = x ! index0
 -- Exp a -> a
 fromExp :: (Elt a) => Exp a -> a
 fromExp x = (toList(run $ unit $ x))!!0
+
+-- Exp Bool -> Bool
+fromExpBool :: Exp Bool -> Bool
+fromExpBool x
+  | int == 1 = True
+  | otherwise = False
+  where int = (fromExp (x ? (1, 0))) :: Int
 
 -- Create 2d index
 index2 :: Int -> Int -> Exp (Z :. Int :. Int)
@@ -192,7 +199,7 @@ step
      -> Int
      -> (Acc (Vector e), e)
 step args state as fs debug iterations =
-  if (fromExp (bl <=* bh + 2 * r)) || 
+  if (fromExpBool (bl <=* bh + 2 * r)) || 
      (debug && (iterations == 0)) then
     (as, fromExp (bl + bh)/2)
   else
